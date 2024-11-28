@@ -6,7 +6,6 @@ from datetime import datetime
 from pathlib import Path
 from tempfile import mkdtemp
 from typing import Any, Optional
-from uuid import UUID
 
 import numpy as np
 import pyarrow as pa
@@ -55,7 +54,7 @@ class ArrowTimeSeriesStorage(TimeSeriesStorageBase):
         metadata: TimeSeriesMetadata,
         time_series: TimeSeriesData,
     ) -> None:
-        fpath = self._ts_directory.joinpath(f"{metadata.time_series_uuid}{EXTENSION}")
+        fpath = self._ts_directory.joinpath(f"{metadata.time_series_id}{EXTENSION}")
         if not fpath.exists():
             if isinstance(time_series, SingleTimeSeries):
                 arrow_batch = self._convert_to_record_batch(time_series, metadata.variable_name)
@@ -84,20 +83,23 @@ class ArrowTimeSeriesStorage(TimeSeriesStorageBase):
         msg = f"Bug: need to implement get_time_series for {type(metadata)}"
         raise NotImplementedError(msg)
 
-    def remove_time_series(self, uuid: UUID) -> None:
-        fpath = self._ts_directory.joinpath(f"{uuid}{EXTENSION}")
+    def remove_time_series(self, time_series_id: int) -> None:
+        fpath = self._ts_directory.joinpath(f"{time_series_id}{EXTENSION}")
         if not fpath.exists():
-            msg = f"No time series with {uuid} is stored"
+            msg = f"No time series with {time_series_id} is stored"
             raise ISNotStored(msg)
         fpath.unlink()
 
-    def serialize(self, dst: Path | str, src: Optional[Path | str] = None) -> None:
+    def serialize(
+        self, data: dict[str, Any], dst: Path | str, src: Optional[Path | str] = None
+    ) -> None:
         # From the shutil documentation: the copying operation will continue if
         # it encounters existing directories, and files within the dst tree
         # will be overwritten by corresponding files from the src tree.
         if src is None:
             src = self._ts_directory
         shutil.copytree(src, dst, dirs_exist_ok=True)
+        data["time_series_storage_type"] = "ArrowTimeSeriesStorage"
         logger.info("Copied time series data to {}", dst)
 
     def _get_single_time_series(
@@ -106,7 +108,7 @@ class ArrowTimeSeriesStorage(TimeSeriesStorageBase):
         start_time: datetime | None = None,
         length: int | None = None,
     ) -> SingleTimeSeries:
-        fpath = self._ts_directory.joinpath(f"{metadata.time_series_uuid}{EXTENSION}")
+        fpath = self._ts_directory.joinpath(f"{metadata.time_series_id}{EXTENSION}")
         with pa.memory_map(str(fpath), "r") as source:
             base_ts = pa.ipc.open_file(source).get_record_batch(0)
             logger.trace("Reading time series from {}", fpath)
@@ -119,7 +121,7 @@ class ArrowTimeSeriesStorage(TimeSeriesStorageBase):
         else:
             np_array = np.array(data)
         return SingleTimeSeries(
-            uuid=metadata.time_series_uuid,
+            id=metadata.time_series_id,
             variable_name=metadata.variable_name,
             resolution=metadata.resolution,
             initial_time=start_time or metadata.initial_time,

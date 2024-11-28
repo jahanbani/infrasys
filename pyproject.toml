@@ -42,6 +42,7 @@ dev = [
     "furo",
     "mypy >=1.13, < 2",
     "myst_parser",
+    "pandas-stubs",
     "pre-commit",
     "pyarrow-stubs",
     "pytest",

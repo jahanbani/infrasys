@@ -7,7 +7,6 @@ import os
 import sqlite3
 from dataclasses import dataclass
 from typing import Any, Optional, Sequence
-from uuid import UUID
 
 from loguru import logger
 
@@ -48,12 +47,12 @@ class TimeSeriesMetadataStore:
     def _create_metadata_table(self):
         schema = [
             "id INTEGER PRIMARY KEY",
-            "time_series_uuid TEXT",
+            "time_series_id int",
             "time_series_type TEXT",
             "initial_time TEXT",
             "resolution TEXT",
             "variable_name TEXT",
-            "component_uuid TEXT",
+            "component_id int",
             "component_type TEXT",
             "user_attributes_hash TEXT",
             "metadata JSON",
@@ -72,13 +71,13 @@ class TimeSeriesMetadataStore:
         #    1b. time series for one component + variable_name + type
         #    1c. time series for one component with all user attributes
         # 2. Optimize for checks at system.add_time_series. Use all fields and attribute hash.
-        # 3. Optimize for returning all metadata for a time series UUID.
+        # 3. Optimize for returning all metadata for a time series ID.
         execute(
             cur,
             f"CREATE INDEX by_c_vn_tst_hash ON {self.TABLE_NAME} "
-            f"(component_uuid, variable_name, time_series_type, user_attributes_hash)",
+            f"(component_id, variable_name, time_series_type, user_attributes_hash)",
         )
-        execute(cur, f"CREATE INDEX by_ts_uuid ON {self.TABLE_NAME} (time_series_uuid)")
+        execute(cur, f"CREATE INDEX by_ts_id ON {self.TABLE_NAME} (time_series_id)")
 
     def add(
         self,
@@ -111,12 +110,12 @@ class TimeSeriesMetadataStore:
         rows = [
             (
                 None,  # auto-assigned by sqlite
-                str(metadata.time_series_uuid),
+                str(metadata.time_series_id),
                 metadata.type,
                 str(metadata.initial_time),
                 str(metadata.resolution),
                 metadata.variable_name,
-                str(component.uuid),
+                component.id,
                 component.__class__.__name__,
                 attribute_hash,
                 json.dumps(serialize_value(metadata)),
@@ -151,7 +150,7 @@ class TimeSeriesMetadataStore:
         time_series_type_count = {(x[0], x[1], x[2], x[3]): x[4] for x in rows}
 
         time_series_count = execute(
-            cur, f"SELECT COUNT(DISTINCT time_series_uuid) from {self.TABLE_NAME}"
+            cur, f"SELECT COUNT(DISTINCT time_series_id) from {self.TABLE_NAME}"
         ).fetchall()[0][0]
 
         return TimeSeriesCounts(
@@ -196,11 +195,11 @@ class TimeSeriesMetadataStore:
 
         return metadata_list[0]
 
-    def has_time_series(self, time_series_uuid: UUID) -> bool:
-        """Return True if there is time series matching the UUID."""
+    def has_time_series(self, time_series_id: int) -> bool:
+        """Return True if there is time series matching the ID."""
         cur = self._con.cursor()
-        query = f"SELECT COUNT(*) FROM {self.TABLE_NAME} WHERE time_series_uuid = ?"
-        row = execute(cur, query, params=(str(time_series_uuid),)).fetchone()
+        query = f"SELECT COUNT(*) FROM {self.TABLE_NAME} WHERE time_series_id = ?"
+        row = execute(cur, query, params=(time_series_id,)).fetchone()
         return row[0] > 0
 
     def has_time_series_metadata(
@@ -238,21 +237,19 @@ class TimeSeriesMetadataStore:
         res = execute(cur, query, params=params).fetchone()
         return res[0] > 0
 
-    def list_existing_time_series(self, time_series_uuids: list[UUID]) -> set[UUID]:
-        """Return the UUIDs that are present."""
+    def list_existing_time_series(self, time_series_ids: list[int]) -> set[int]:
+        """Return the IDs that are present."""
         cur = self._con.cursor()
-        params = tuple(str(x) for x in time_series_uuids)
-        uuids = ",".join(itertools.repeat("?", len(time_series_uuids)))
-        query = (
-            f"SELECT time_series_uuid FROM {self.TABLE_NAME} WHERE time_series_uuid IN ({uuids})"
-        )
+        params = tuple(time_series_ids)
+        ids = ",".join(itertools.repeat("?", len(time_series_ids)))
+        query = f"SELECT time_series_id FROM {self.TABLE_NAME} WHERE time_series_id IN ({ids})"
         rows = execute(cur, query, params=params).fetchall()
-        return {UUID(x[0]) for x in rows}
+        return {x[0] for x in rows}
 
-    def list_missing_time_series(self, time_series_uuids: list[UUID]) -> set[UUID]:
-        """Return the UUIDs that are not present."""
-        existing_uuids = set(self.list_existing_time_series(time_series_uuids))
-        return set(time_series_uuids) - existing_uuids
+    def list_missing_time_series(self, time_series_ids: list[int]) -> set[int]:
+        """Return the IDs that are not present."""
+        existing_ids = set(self.list_existing_time_series(time_series_ids))
+        return set(time_series_ids) - existing_ids
 
     def list_metadata(
         self,
@@ -339,11 +336,11 @@ class TimeSeriesMetadataStore:
         variable_name: str | None = None,
         time_series_type: Optional[str] = None,
         **user_attributes,
-    ) -> list[UUID]:
-        """Remove all matching rows and return the time series UUIDs."""
+    ) -> list[int]:
+        """Remove all matching rows and return the time series IDs."""
         cur = self._con.cursor()
         if not self._supports_sqlite_json:
-            ts_uuids = set()
+            ts_ids = set()
             ids = []
             for id_, metadata in self._list_metadata_no_sql_json(
                 *components,
@@ -351,7 +348,7 @@ class TimeSeriesMetadataStore:
                 time_series_type=time_series_type,
                 **user_attributes,
             ):
-                ts_uuids.add(metadata.time_series_uuid)
+                ts_ids.add(metadata.time_series_id)
                 ids.append(id_)
             params = [str(x) for x in ids]
             id_str = ",".join(itertools.repeat("?", len(ids)))
@@ -359,25 +356,25 @@ class TimeSeriesMetadataStore:
             execute(cur, query, params=params)
             count_deleted = execute(cur, "SELECT changes()").fetchall()[0][0]
             if count_deleted != len(ids):
-                msg = f"Bug: Unexpected length mismatch {len(ts_uuids)=} {count_deleted=}"
+                msg = f"Bug: Unexpected length mismatch {len(ts_ids)=} {count_deleted=}"
                 raise Exception(msg)
             self._con.commit()
-            return list(ts_uuids)
+            return list(ts_ids)
 
         where_clause, params = self._make_where_clause(
             components, variable_name, time_series_type, **user_attributes
         )
-        query = f"SELECT time_series_uuid FROM {self.TABLE_NAME} WHERE {where_clause}"
-        uuids = [UUID(x[0]) for x in execute(cur, query, params=params).fetchall()]
+        query = f"SELECT time_series_id FROM {self.TABLE_NAME} WHERE {where_clause}"
+        ids = [x[0] for x in execute(cur, query, params=params).fetchall()]
 
         query = f"DELETE FROM {self.TABLE_NAME} WHERE ({where_clause})"
         execute(cur, query, params=params)
         self._con.commit()
         count_deleted = execute(cur, "SELECT changes()").fetchall()[0][0]
-        if len(uuids) != count_deleted:
-            msg = f"Bug: Unexpected length mismatch: {len(uuids)=} {count_deleted=}"
+        if len(ids) != count_deleted:
+            msg = f"Bug: Unexpected length mismatch: {len(ids)=} {count_deleted=}"
             raise Exception(msg)
-        return uuids
+        return ids
 
     def sql(self, query: str, params: Sequence[str] = ()) -> list[tuple]:
         """Run a SQL query on the time series metadata table."""
@@ -398,10 +395,10 @@ class TimeSeriesMetadataStore:
             msg = "At least one component must be passed."
             raise ISOperationNotAllowed(msg)
 
-        or_clause = "OR ".join((itertools.repeat("component_uuid = ? ", len(components))))
+        or_clause = "OR ".join((itertools.repeat("component_id = ? ", len(components))))
 
         for component in components:
-            params.append(str(component.uuid))
+            params.append(str(component.id))
 
         return f"({or_clause})"
 

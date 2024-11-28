@@ -54,10 +54,11 @@ class QuadraticFunctionData(FunctionData):
     """
 
     quadratic_term: Annotated[
-        float, Field(description="the quadratic term in the represented function.")
+        pint.Quantity | float, Field(description="the quadratic term in the represented function.")
     ]
     proportional_term: Annotated[
-        float, Field(description="the proportional term in the represented function.")
+        pint.Quantity | float,
+        Field(description="the proportional term in the represented function."),
     ]
     constant_term: Annotated[
         float, Field(description="the constant term in the represented function.")

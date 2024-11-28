@@ -1,7 +1,6 @@
 import enum
 import importlib
 from typing import Any, Literal, Annotated, Type, Union
-from uuid import UUID
 
 from pydantic import Field, field_serializer
 
@@ -33,14 +32,14 @@ class SerializedBaseType(SerializedTypeBase):
 
 
 class SerializedComponentReference(SerializedTypeBase):
-    """Reference information for a component that has been serialized as a UUID within another."""
+    """Reference information for a component that has been serialized as an integer within another."""
 
     serialized_type: Literal[SerializedType.COMPOSED_COMPONENT] = SerializedType.COMPOSED_COMPONENT
-    uuid: UUID
+    id: int
 
-    @field_serializer("uuid")
-    def _serialize_uuid(self, _) -> str:
-        return str(self.uuid)
+    @field_serializer("id")
+    def _serialize_id(self, _) -> str:
+        return str(self.id)
 
 
 class SerializedQuantityType(SerializedTypeBase):

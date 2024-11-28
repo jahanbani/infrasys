@@ -1,11 +1,9 @@
 """Base models for the package"""
 
 import abc
-from typing import Any
-from uuid import UUID, uuid4
+from typing import Any, Optional
 
-from loguru import logger
-from pydantic import BaseModel, ConfigDict, Field, field_serializer
+from pydantic import BaseModel, ConfigDict, Field
 
 
 def make_model_config(**kwargs: Any) -> ConfigDict:
@@ -29,18 +27,13 @@ class InfraSysBaseModel(BaseModel):
 
 
 class InfraSysBaseModelWithIdentifers(InfraSysBaseModel, abc.ABC):
-    """Base class for all Infrastructure Systems types with UUIDs"""
+    """Base class for all Infrastructure Systems types with IDs"""
 
-    uuid: UUID = Field(default_factory=uuid4, repr=False)
-
-    @field_serializer("uuid")
-    def _serialize_uuid(self, _) -> str:
-        return str(self.uuid)
-
-    def assign_new_uuid(self):
-        """Generate a new UUID."""
-        self.uuid = uuid4()
-        logger.debug("Assigned new UUID for %s: %s", self.label, self.uuid)
+    id: Optional[int] = Field(
+        default=None,
+        description="Unique identifier, assigned when added to a system.",
+        repr=False,
+    )
 
     @classmethod
     def example(cls) -> "InfraSysBaseModelWithIdentifers":
@@ -58,7 +51,7 @@ class InfraSysBaseModelWithIdentifers(InfraSysBaseModel, abc.ABC):
     def label(self) -> str:
         """Provides a description of an instance."""
         class_name = self.__class__.__name__
-        name = getattr(self, "name", "") or str(self.uuid)
+        name = getattr(self, "name", "") or str(self.id)
         return make_label(class_name, name)
 
 
@@ -67,15 +60,15 @@ def make_label(class_name: str, name: str) -> str:
     return f"{class_name}.{name}"
 
 
-def get_class_and_name_from_label(label: str) -> tuple[str, str | UUID]:
+def get_class_and_name_from_label(label: str) -> tuple[str, str | int]:
     """Return the class and name from a label.
-    If the name is a stringified UUID, it will be converted to a UUID.
+    If the name is a stringified ID, it will be converted to an int.
     """
     class_name, name = label.split(".", maxsplit=1)
-    name_or_uuid: str | UUID = name
+    name_or_id: str | int = name
     try:
-        name_or_uuid = UUID(name)
+        name_or_id = int(name)  # TODO DT
     except ValueError:
         pass
 
-    return class_name, name_or_uuid
+    return class_name, name_or_id

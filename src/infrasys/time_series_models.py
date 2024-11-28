@@ -13,9 +13,9 @@ from typing import (
     Union,
     Sequence,
 )
-from uuid import UUID
 
 import numpy as np
+import pandas as pd
 import pint
 from numpy.typing import NDArray
 from pydantic import (
@@ -209,6 +209,20 @@ class SingleTimeSeries(TimeSeriesData):
     def get_time_series_metadata_type() -> Type:
         return SingleTimeSeriesMetadata
 
+    def make_timestamps(self) -> NDArray:
+        """Return the timestamps as a numpy array."""
+        return pd.date_range(
+            start=self.initial_time, periods=len(self.data), freq=self.resolution
+        ).values
+
+    # def get_time_series_array(self) -> pd.DataFrame:
+    #    """Return the data and timestamps as a DataFrame.
+    #    The columns are 'timestamp' and 'data.' The index is the default range index.
+    #    """
+
+    # def get_time_series_values(self) -> NDArray:
+    #    """Return the data as a numpy array."""
+
 
 class SingleTimeSeriesScalingFactor(SingleTimeSeries):
     """Defines a time array with a single dimension of floats that are 0-1 scaling factors."""
@@ -248,7 +262,7 @@ class TimeSeriesMetadata(InfraSysBaseModel, abc.ABC):
     variable_name: str
     initial_time: datetime
     resolution: timedelta
-    time_series_uuid: UUID
+    time_series_id: int
     user_attributes: dict[str, Any] = {}
     quantity_metadata: Optional[QuantityMetadata] = None
     normalization: NormalizationModel = None
@@ -289,12 +303,13 @@ class SingleTimeSeriesMetadataBase(TimeSeriesMetadata, abc.ABC):
             if isinstance(time_series.data, pint.Quantity)
             else None
         )
+        assert time_series.id is not None
         return cls(
             variable_name=time_series.variable_name,
             resolution=time_series.resolution,
             initial_time=time_series.initial_time,
             length=time_series.length,  # type: ignore
-            time_series_uuid=time_series.uuid,
+            time_series_id=time_series.id,
             user_attributes=user_attributes,
             quantity_metadata=quantity_metadata,
             normalization=time_series.normalization,

@@ -1,7 +1,6 @@
 """Parquet time series storage"""
 
 from datetime import datetime
-from uuid import UUID
 
 from infrasys.time_series_models import TimeSeriesData, TimeSeriesMetadata
 from infrasys.time_series_storage_base import TimeSeriesStorageBase
@@ -22,5 +21,5 @@ class ParquetTimeSeriesStorage(TimeSeriesStorageBase):
         msg = "ParquetTimeSeriesStorage.get_time_series"
         raise NotImplementedError(msg)
 
-    def remove_time_series(self, uuid: UUID) -> None:
+    def remove_time_series(self, time_series_id: int) -> None:
         ...

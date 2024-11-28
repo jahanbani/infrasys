@@ -23,6 +23,7 @@ from infrasys.component import (
     Component,
 )
 from infrasys.component_manager import ComponentManager
+from infrasys.id_manager import IDManager
 from infrasys.serialization import (
     CachedTypeHelper,
     SerializedTypeMetadata,
@@ -49,6 +50,7 @@ class System:
         auto_add_composed_components: bool = False,
         con: Optional[sqlite3.Connection] = None,
         time_series_manager: Optional[TimeSeriesManager] = None,
+        id_manager: Optional[IDManager] = None,
         uuid: Optional[UUID] = None,
         **kwargs: Any,
     ) -> None:
@@ -85,11 +87,14 @@ class System:
         self._uuid = uuid or uuid4()
         self._name = name
         self._description = description
-        self._component_mgr = ComponentManager(self._uuid, auto_add_composed_components)
+        self._id_manager = id_manager or IDManager(next_id=1)
+        self._component_mgr = ComponentManager(
+            self._uuid, auto_add_composed_components, self._id_manager
+        )
         self._con = con or create_in_memory_db()
         time_series_kwargs = {k: v for k, v in kwargs.items() if k in TIME_SERIES_KWARGS}
         self._time_series_mgr = time_series_manager or TimeSeriesManager(
-            self._con, **time_series_kwargs
+            self._con, self._id_manager, **time_series_kwargs
         )
         self._data_format_version: Optional[str] = None
         # Note to devs: if you add new fields, add support in to_json/from_json as appropriate.
@@ -144,6 +149,7 @@ class System:
             "name": self.name,
             "description": self.description,
             "uuid": str(self.uuid),
+            "next_id": self._id_manager.next_id,
             "data_format_version": self.data_format_version,
             "components": [x.model_dump_custom() for x in self._component_mgr.iter_all()],
             "time_series": {
@@ -166,12 +172,13 @@ class System:
                 msg = "data contains the key 'system'"
                 raise ISConflictingArguments(msg)
             data["system"] = system_data
+
+        backup(self._con, time_series_dir / self.DB_FILENAME)
+        self._time_series_mgr.serialize(system_data["time_series"], time_series_dir)  # type: ignore
+
         with open(filename, "w", encoding="utf-8") as f_out:
             json.dump(data, f_out, indent=indent)
             logger.info("Wrote system data to {}", filename)
-
-        backup(self._con, time_series_dir / self.DB_FILENAME)
-        self._time_series_mgr.serialize(time_series_dir)
 
     @classmethod
     def from_json(
@@ -267,6 +274,10 @@ class System:
         """
         system_data = data if "system" not in data else data["system"]
         ts_kwargs = {k: v for k, v in kwargs.items() if k in TIME_SERIES_KWARGS}
+        if "time_series_use_chronify" in kwargs:
+            logger.warning("Ignoring keyword 'time_series_use_chronify.' Use existing setting.")
+            kwargs.pop("time_series_use_chronify")
+
         ts_path = (
             time_series_parent_dir
             if isinstance(time_series_parent_dir, Path)
@@ -274,8 +285,9 @@ class System:
         )
         con = create_in_memory_db()
         restore(con, ts_path / data["time_series"]["directory"] / System.DB_FILENAME)
+        id_manager = IDManager(next_id=system_data["next_id"])
         time_series_manager = TimeSeriesManager.deserialize(
-            con, data["time_series"], ts_path, **ts_kwargs
+            con, id_manager, data["time_series"], ts_path, **ts_kwargs
         )
         system = cls(
             name=system_data.get("name"),
@@ -283,6 +295,7 @@ class System:
             con=con,
             time_series_manager=time_series_manager,
             uuid=UUID(system_data["uuid"]),
+            id_manager=id_manager,
             **kwargs,
         )
         if system_data.get("data_format_version") != system.data_format_version:
@@ -417,15 +430,15 @@ class System:
         """
         return self._component_mgr.add(*components, **kwargs)
 
-    def change_component_uuid(self, component: Component) -> None:
-        """Change the component UUID. This is required if you copy a component and attach it to
+    def change_component_id(self, component: Component) -> None:
+        """Change the component ID. This is required if you copy a component and attach it to
         the same system.
 
         Parameters
         ----------
         component : Component
         """
-        return self._component_mgr.change_uuid(component)
+        return self._component_mgr.change_id(component)
 
     def copy_component(
         self,
@@ -435,7 +448,7 @@ class System:
     ) -> Any:
         """Create a copy of the component. Time series data is excluded.
 
-        - The new component will have a different UUID than the original.
+        - The new component will have a different ID than the original.
         - The copied component will have shared references to any composed components.
 
         The intention of this method is to provide a way to create variants of a component that
@@ -465,7 +478,7 @@ class System:
 
     def deepcopy_component(self, component: Component) -> Any:
         """Create a deep copy of the component and all composed components. All attributes,
-        including names and UUIDs, will be identical to the original. Unlike
+        including names and IDs, will be identical to the original. Unlike
         :meth:`copy_component`, there will be no shared references to composed components.
 
         The intention of this method is to provide a way to create variants of a component that
@@ -527,7 +540,7 @@ class System:
         Raises
         ------
         ISNotStored
-            Raised if the UUID is not stored.
+            Raised if the ID is not stored.
         ISOperationNotAllowed
             Raised if there is more than one matching component.
 
@@ -537,24 +550,24 @@ class System:
         """
         return self._component_mgr.get_by_label(label)
 
-    def get_component_by_uuid(self, uuid: UUID) -> Any:
-        """Return the component with the input UUID.
+    def get_component_by_id(self, component_id: int) -> Any:
+        """Return the component with the input ID.
 
         Parameters
         ----------
-        uuid : UUID
+        component_id
+            Unique identifier of component
 
         Raises
         ------
         ISNotStored
-            Raised if the UUID is not stored.
+            Raised if the ID is not stored.
 
         Examples
         --------
-        >>> uuid = UUID("714c8311-8dff-4ae2-aa2e-30779a317d42")
-        >>> component = system.get_component_by_uuid(uuid)
+        >>> component = system.get_component_by_id(1407)
         """
-        return self._component_mgr.get_by_uuid(uuid)
+        return self._component_mgr.get_by_id(component_id)
 
     def get_components(
         self, *component_type: Type[Component], filter_func: Callable | None = None
@@ -749,14 +762,14 @@ class System:
         component = self.get_component(component_type, name)
         return self.remove_component(component, cascade_down=cascade_down, force=force)
 
-    def remove_component_by_uuid(
-        self, uuid: UUID, cascade_down: bool = True, force: bool = False
+    def remove_component_by_id(
+        self, component_id: int, cascade_down: bool = True, force: bool = False
     ) -> Any:
-        """Remove the component with uuid from the system and return it.
+        """Remove the component with component_id from the system and return it.
 
         Parameters
         ----------
-        uuid : UUID
+        component_id : int
         cascade_down : bool
             Refer :meth:`remove_component`.
         force : bool
@@ -765,14 +778,13 @@ class System:
         Raises
         ------
         ISNotStored
-            Raised if the UUID is not stored in the system.
+            Raised if the ID is not stored in the system.
 
         Examples
         --------
-        >>> uuid = UUID("714c8311-8dff-4ae2-aa2e-30779a317d42")
-        >>> generator = system.remove_component_by_uuid(uuid)
+        >>> generator = system.remove_component_by_id(1407)
         """
-        component = self.get_component_by_uuid(uuid)
+        component = self.get_component_by_id(component_id)
         return self.remove_component(component, cascade_down=cascade_down, force=force)
 
     def update_components(
@@ -1260,7 +1272,7 @@ class System:
     ) -> Any:
         component_type = cached_types.get_type(metadata)
         if cached_types.allowed_to_deserialize(component_type):
-            return self._components.get_by_uuid(metadata.uuid)
+            return self._components.get_by_id(metadata.id)
         return None
 
     def _deserialize_composed_list(
@@ -1272,7 +1284,7 @@ class System:
             assert isinstance(metadata.fields, SerializedComponentReference)
             component_type = cached_types.get_type(metadata.fields)
             if cached_types.allowed_to_deserialize(component_type):
-                deserialized_components.append(self._components.get_by_uuid(metadata.fields.uuid))
+                deserialized_components.append(self._components.get_by_id(metadata.fields.id))
             else:
                 return None
         return deserialized_components
@@ -1284,7 +1296,7 @@ class System:
     def show_components(self, component_type):
         # Filtered view of certain concrete types (not really concrete types)
         # We can implement custom printing if we want
-        # Dan suggest to remove UUID, system.UUID from component.
+        # Dan suggest to remove ID, system.UUID from component.
         # Nested components gets special handling.
         # What we do with components w/o names? Use .label for nested components.
         raise NotImplementedError

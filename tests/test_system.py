@@ -1,7 +1,6 @@
 import itertools
 import os
 from datetime import timedelta, datetime
-from uuid import uuid4
 
 import numpy as np
 import pytest
@@ -72,9 +71,11 @@ def test_get_components(simple_system: SimpleSystem):
     initial_count = 4
     assert len(list(system.get_components(Component))) == initial_count
     system.auto_add_composed_components = True
-    for _ in range(5):
+    tmp_components = []
+    for i in range(5):
         gen = RenewableGenerator.example()
         system.add_component(gen)
+        tmp_components.append(gen)
     all_components = list(system.get_components(Component))
     # 5 generators, each includes a bus and location
     assert len(all_components) == initial_count + 5 * 3
@@ -89,9 +90,10 @@ def test_get_components(simple_system: SimpleSystem):
     assert len(list(system.list_components_by_name(RenewableGenerator, "renewable-gen"))) == 5
 
     gen = all_components[0]
-    assert system.get_component_by_uuid(gen.uuid) is gen
+    assert gen.id is not None
+    assert system.get_component_by_id(gen.id) is gen
     with pytest.raises(ISNotStored):
-        system.get_component_by_uuid(uuid4())
+        system.get_component_by_id(123492784982)
 
     stored_types = sorted((x.__name__ for x in system.get_component_types()))
     assert stored_types == [
@@ -247,14 +249,20 @@ def test_time_series():
 
 
 @pytest.mark.parametrize(
-    "in_memory,use_quantity,sql_json",
-    list(itertools.product([True, False], [True, False], [True, False])),
+    "ts_storage,use_quantity,sql_json",
+    list(itertools.product(["memory", "arrow", "chronify"], [True, False], [True, False])),
 )
-def test_time_series_retrieval(in_memory, use_quantity, sql_json):
+def test_time_series_retrieval(ts_storage, use_quantity, sql_json):
     try:
         if not sql_json:
             os.environ["__INFRASYS_NON_JSON_SQLITE__"] = "1"
-        system = SimpleSystem(time_series_in_memory=in_memory)
+        kwargs = {}
+        match ts_storage:
+            case "memory":
+                kwargs["time_series_in_memory"] = True
+            case "chronify":
+                kwargs["time_series_use_chronify"] = True
+        system = SimpleSystem(**kwargs)
         bus = SimpleBus(name="test-bus", voltage=1.1)
         gen = SimpleGenerator(name="gen", active_power=1.0, rating=1.0, bus=bus, available=True)
         system.add_components(bus, gen)
@@ -348,14 +356,12 @@ def test_time_series_removal():
     system.add_components(bus, gen1, gen2)
 
     variable_names = ["active_power", "reactive_power"]
-    uuids = []
     for variable_name in variable_names:
         length = 8784
         data = range(length)
         start = datetime(year=2020, month=1, day=1)
         resolution = timedelta(hours=1)
         ts = SingleTimeSeries.from_array(data, variable_name, start, resolution)
-        uuids.append(ts.uuid)
         for gen in (gen1, gen2):
             system.add_time_series(ts, gen, scenario="high", model_year="2030")
             system.add_time_series(ts, gen, scenario="high", model_year="2035")
@@ -415,12 +421,18 @@ def test_serialize_time_series_from_array(tmp_path):
     assert ts2.data.tolist() == list(data)
 
 
-@pytest.mark.parametrize("in_memory", [True, False])
-def test_time_series_slices(in_memory):
+@pytest.mark.parametrize("ts_storage", ["memory", "arrow", "chronify"])
+def test_time_series_slices(ts_storage):
+    kwargs = {}
+    match ts_storage:
+        case "memory":
+            kwargs["time_series_in_memory"] = True
+        case "chronify":
+            kwargs["time_series_use_chronify"] = True
     system = SimpleSystem(
         name="test-system",
         auto_add_composed_components=True,
-        time_series_in_memory=in_memory,
+        **kwargs,
     )
     gen = SimpleGenerator.example()
     system.add_components(gen)
@@ -486,7 +498,7 @@ def test_copy_component(simple_system_with_time_series: SimpleSystem):
     gen1 = system.get_component(SimpleGenerator, "test-gen")
 
     gen2 = system.copy_component(gen1)
-    assert gen2.uuid != gen1.uuid
+    assert gen2.id != gen1.id
     assert gen2.name == gen1.name
     assert gen2.bus is gen1.bus
 
@@ -504,8 +516,8 @@ def test_deepcopy_component(simple_system_with_time_series: SimpleSystem):
     system.add_component(subsystem)
     gen2 = system.deepcopy_component(gen1)
     assert gen2.name == gen1.name
-    assert gen2.uuid == gen1.uuid
-    assert gen2.bus.uuid == gen1.bus.uuid
+    assert gen2.id == gen1.id
+    assert gen2.bus.id == gen1.bus.id
     assert gen2.bus is not gen1.bus
 
 
@@ -535,7 +547,7 @@ def test_remove_component(inputs):
     assert not system.has_time_series(gen1)
     assert system.has_time_series(gen2)
 
-    system.remove_component_by_uuid(gen2.uuid, cascade_down=cascade_down)
+    system.remove_component_by_id(gen2.id, cascade_down=cascade_down)
     assert system.has_component(bus) != cascade_down
     assert not system.has_time_series(gen2)
 
@@ -562,7 +574,7 @@ def test_system_to_dict():
 
     component_dict: list[dict] = list(system.to_records(SimpleGenerator))
     assert len(component_dict) == 3  # 3 generators
-    assert component_dict[0].get("uuid") is not None
+    assert component_dict[0].get("id") is not None
     assert component_dict[0]["bus"] == gen1.bus.label
 
     exclude_first_level_fields = {"name": True, "available": True}
@@ -602,17 +614,17 @@ def test_time_series_metadata_sql():
     system.add_time_series(ts2, gen2)
     rows = system.time_series.metadata_store.sql(
         f"""
-        SELECT component_type, time_series_type, component_uuid, time_series_uuid
+        SELECT component_type, time_series_type, component_id, time_series_id
         FROM {system.time_series.metadata_store.TABLE_NAME}
-        WHERE component_uuid = '{gen1.uuid}'
+        WHERE component_id = {gen1.id}
     """
     )
     assert len(rows) == 1
     row = rows[0]
     assert row[0] == SimpleGenerator.__name__
     assert row[1] == SingleTimeSeries.__name__
-    assert row[2] == str(gen1.uuid)
-    assert row[3] == str(ts1.uuid)
+    assert row[2] == gen1.id
+    assert row[3] == ts1.id
 
 
 def test_time_series_metadata_list_rows():
@@ -632,8 +644,8 @@ def test_time_series_metadata_list_rows():
     columns = [
         "component_type",
         "time_series_type",
-        "component_uuid",
-        "time_series_uuid",
+        "component_id",
+        "time_series_id",
     ]
     rows = system.time_series.metadata_store.list_rows(
         gen2,
@@ -645,8 +657,8 @@ def test_time_series_metadata_list_rows():
     row = rows[0]
     assert row[0] == SimpleGenerator.__name__
     assert row[1] == SingleTimeSeries.__name__
-    assert row[2] == str(gen2.uuid)
-    assert row[3] == str(ts2.uuid)
+    assert row[2] == gen2.id
+    assert row[3] == ts2.id
 
 
 def test_system_counts():

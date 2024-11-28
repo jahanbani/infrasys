@@ -10,6 +10,8 @@ from loguru import logger
 from infrasys.arrow_storage import ArrowTimeSeriesStorage
 from infrasys import Component
 from infrasys.exceptions import ISOperationNotAllowed
+from infrasys.chronify_time_series_storage import ChronifyTimeSeriesStorage
+from infrasys.id_manager import IDManager
 from infrasys.in_memory_time_series_storage import InMemoryTimeSeriesStorage
 from infrasys.time_series_metadata_store import TimeSeriesMetadataStore
 from infrasys.time_series_models import (
@@ -23,6 +25,8 @@ TIME_SERIES_KWARGS = {
     "time_series_in_memory": False,
     "time_series_read_only": False,
     "time_series_directory": None,
+    "time_series_use_chronify": False,
+    "time_series_engine_name": "duckdb",
 }
 
 
@@ -36,17 +40,27 @@ class TimeSeriesManager:
     def __init__(
         self,
         con: sqlite3.Connection,
+        id_manager: IDManager,
         storage: Optional[TimeSeriesStorageBase] = None,
         initialize: bool = True,
         **kwargs,
     ) -> None:
+        self._id_manager = id_manager
         base_directory: Path | None = _process_time_series_kwarg("time_series_directory", **kwargs)
         self._read_only = _process_time_series_kwarg("time_series_read_only", **kwargs)
-        self._storage = storage or (
-            InMemoryTimeSeriesStorage()
-            if _process_time_series_kwarg("time_series_in_memory", **kwargs)
-            else ArrowTimeSeriesStorage.create_with_temp_directory(base_directory=base_directory)
-        )
+        if storage:
+            self._storage = storage
+        elif _process_time_series_kwarg("time_series_in_memory", **kwargs):
+            self._storage = InMemoryTimeSeriesStorage()
+        elif _process_time_series_kwarg("time_series_use_chronify", **kwargs):
+            self._storage = ChronifyTimeSeriesStorage.create_with_temp_directory(
+                base_directory=base_directory,
+                engine_name=_process_time_series_kwarg("time_series_engine_name", **kwargs),
+            )
+        else:
+            self._storage = ArrowTimeSeriesStorage.create_with_temp_directory(
+                base_directory=base_directory
+            )
         self._metadata_store = TimeSeriesMetadataStore(con, initialize=initialize)
 
         # TODO: create parsing mechanism? CSV, CSV + JSON
@@ -95,10 +109,14 @@ class TimeSeriesManager:
         if not issubclass(ts_type, TimeSeriesData):
             msg = f"The first argument must be an instance of TimeSeriesData: {ts_type}"
             raise ValueError(msg)
+
+        if time_series.id is None:
+            time_series.id = self._id_manager.get_next_id()
+
         metadata_type = ts_type.get_time_series_metadata_type()
         metadata = metadata_type.from_data(time_series, **user_attributes)
 
-        if not self._metadata_store.has_time_series(time_series.uuid):
+        if not self._metadata_store.has_time_series(time_series.id):
             self._storage.add_time_series(metadata, time_series)
 
         self._metadata_store.add(metadata, *components)
@@ -199,15 +217,15 @@ class TimeSeriesManager:
             Raised if the manager was created in read-only mode.
         """
         self._handle_read_only()
-        time_series_uuids = self._metadata_store.remove(
+        time_series_ids = self._metadata_store.remove(
             *components,
             variable_name=variable_name,
             time_series_type=time_series_type.__name__,
             **user_attributes,
         )
-        missing_uuids = self._metadata_store.list_missing_time_series(time_series_uuids)
-        for uuid in missing_uuids:
-            self._storage.remove_time_series(uuid)
+        missing_ids = self._metadata_store.list_missing_time_series(time_series_ids)
+        for ts_id in missing_ids:
+            self._storage.remove_time_series(ts_id)
             logger.info("Removed time series {}.{}", time_series_type, variable_name)
 
     def copy(
@@ -249,14 +267,17 @@ class TimeSeriesManager:
             length=length,
         )
 
-    def serialize(self, dst: Path | str, src: Optional[Path | str] = None) -> None:
+    def serialize(
+        self, data: dict[str, Any], dst: Path | str, src: Optional[Path | str] = None
+    ) -> None:
         """Serialize the time series data to dst."""
-        self._storage.serialize(dst, src)
+        return self._storage.serialize(data, dst, src)
 
     @classmethod
     def deserialize(
         cls,
         con: sqlite3.Connection,
+        id_manager: IDManager,
         data: dict[str, Any],
         parent_dir: Path | str,
         **kwargs: Any,
@@ -269,14 +290,39 @@ class TimeSeriesManager:
             raise ISOperationNotAllowed(msg)
 
         time_series_dir = Path(parent_dir) / data["directory"]
+        storage: TimeSeriesStorageBase
+        match data["time_series_storage_type"]:
+            case "ChronifyTimeSeriesStorage":
+                if _process_time_series_kwarg("time_series_read_only", **kwargs):
+                    storage = ChronifyTimeSeriesStorage.from_file(
+                        data["filename"], engine_name=data["engine_name"]
+                    )
+                else:
+                    storage = ChronifyTimeSeriesStorage.from_file_to_tmp_file(
+                        data["filename"], engine_name=data["engine_name"], dst_dir=time_series_dir
+                    )
+            case "ArrowTimeSeriesStorage":
+                if _process_time_series_kwarg("time_series_read_only", **kwargs):
+                    storage = ArrowTimeSeriesStorage.create_with_permanent_directory(
+                        time_series_dir
+                    )
+                else:
+                    storage = ArrowTimeSeriesStorage.create_with_temp_directory()
+                    storage.serialize({}, storage.get_time_series_directory(), src=time_series_dir)
+            case _:
+                msg = data["time_series_storage_type"]
+                raise NotImplementedError(msg)
 
-        if _process_time_series_kwarg("time_series_read_only", **kwargs):
-            storage = ArrowTimeSeriesStorage.create_with_permanent_directory(time_series_dir)
-        else:
-            storage = ArrowTimeSeriesStorage.create_with_temp_directory()
-            storage.serialize(src=time_series_dir, dst=storage.get_time_series_directory())
+        return cls(con, id_manager, storage=storage, initialize=False, **kwargs)
 
-        return cls(con, storage=storage, initialize=False, **kwargs)
+    def get_engine_name(self) -> Optional[str]:
+        if isinstance(self._storage, ChronifyTimeSeriesStorage):
+            return self._storage.get_engine_name()
+        return None
+
+    def uses_chronify(self) -> bool:
+        """Return True if the storage uses chronify."""
+        return isinstance(self._storage, ChronifyTimeSeriesStorage)
 
     def _handle_read_only(self) -> None:
         if self._read_only:

@@ -65,7 +65,7 @@ def test_serialization(tmp_path):
     assert len(components2) == num_components
 
     for component in components:
-        component2 = system2.get_component_by_uuid(component.uuid)
+        component2 = system2.get_component_by_id(component.id)
         for key, val in component.__dict__.items():
             assert getattr(component2, key) == val
 

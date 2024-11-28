@@ -4,8 +4,7 @@
 import abc
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
-from uuid import UUID
+from typing import Any, Optional
 
 from infrasys.time_series_models import TimeSeriesData, TimeSeriesMetadata
 
@@ -33,9 +32,11 @@ class TimeSeriesStorageBase(abc.ABC):
         """Return a time series array."""
 
     @abc.abstractmethod
-    def remove_time_series(self, uuid: UUID) -> None:
+    def remove_time_series(self, time_series_id: int) -> None:
         """Remove a time series array and return it."""
 
     @abc.abstractmethod
-    def serialize(self, dst: Path | str, src: Optional[Path | str] = None) -> None:
+    def serialize(
+        self, data: dict[str, Any], dst: Path | str, src: Optional[Path | str] = None
+    ) -> None:
         """Serialize all time series to the destination directory."""
